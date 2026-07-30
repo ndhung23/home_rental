@@ -1,13 +1,12 @@
-import { env } from "cloudflare:workers";
-import { drizzle } from "drizzle-orm/d1";
-import * as schema from "./schema";
+import { Pool } from "pg";
 
-export function getDb() {
-  if (!env.DB) {
-    throw new Error(
-      "Cloudflare D1 binding `DB` is unavailable. Set the `d1` field in .openai/hosting.json to `DB` or let your control plane inject the real binding values before using the database."
-    );
-  }
+const globalForDb = globalThis as unknown as { homeManagerPool?: Pool };
 
-  return drizzle(env.DB, { schema });
-}
+export const db =
+  globalForDb.homeManagerPool ??
+  new Pool({
+    connectionString: process.env.DATABASE_URL,
+    max: 10,
+  });
+
+if (process.env.NODE_ENV !== "production") globalForDb.homeManagerPool = db;
