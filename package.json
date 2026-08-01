@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "db:migrate": "node --env-file=.env scripts/apply-migrations.mjs",
     "start": "next start",
     "lint": "eslint . --ignore-pattern .next"
   },

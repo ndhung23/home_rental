@@ -21,6 +21,7 @@ type BillingRoom = {
   total_amount: number | null;
   service_amount: number | null;
   invoice_status: "unpaid" | "paid" | "overdue" | null;
+  reminder_count: number;
   electricity_previous: number;
   electricity_current: number;
   water_previous: number;
@@ -50,6 +51,7 @@ export function BillingManager() {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [printRoom, setPrintRoom] = useState<BillingRoom | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -74,6 +76,7 @@ export function BillingManager() {
         internet_price: Number(room.internet_price),
         trash_price: Number(room.trash_price),
         payment_due_day: Number(room.payment_due_day),
+        reminder_count: Number(room.reminder_count || 0),
       })));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Không thể tải dữ liệu");
@@ -83,12 +86,18 @@ export function BillingManager() {
   }, [period]);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!printRoom) return;
+    const clearPrint = () => setPrintRoom(null);
+    window.addEventListener("afterprint", clearPrint, { once: true });
+    const timer = window.setTimeout(() => window.print(), 50);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("afterprint", clearPrint);
+    };
+  }, [printRoom]);
 
   const price = (code: string) => Number(services.find((service) => service.code === code)?.unit_price || 0);
-  const fixedTotal = useMemo(
-    () => services.filter((service) => service.calculation_type === "fixed").reduce((sum, service) => sum + Number(service.unit_price), 0),
-    [services],
-  );
   const roomTotal = (room: BillingRoom) =>
     room.invoice_id
       ? Number(room.total_amount)
@@ -154,10 +163,37 @@ export function BillingManager() {
     }
   };
 
-  const markPaid = async (invoiceId: string) => {
+  const markRoomPaid = async (room: BillingRoom) => {
     setSaving(true);
     setError("");
     try {
+      let invoiceId = room.invoice_id;
+      if (!invoiceId) {
+        if (room.electricity_current < room.electricity_previous || room.water_current < room.water_previous) {
+          throw new Error(`Chỉ số mới của phòng ${room.code} phải lớn hơn hoặc bằng chỉ số cũ.`);
+        }
+        const createResponse = await fetch("/api/billing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            period,
+            dueDate,
+            rooms: [{
+              id: room.id,
+              code: room.code,
+              monthlyRent: room.monthly_rent,
+              electricityPrevious: room.electricity_previous,
+              electricityCurrent: room.electricity_current,
+              waterPrevious: room.water_previous,
+              waterCurrent: room.water_current,
+            }],
+          }),
+        });
+        const created = await createResponse.json();
+        if (!createResponse.ok) throw new Error(created.error || "Không thể lưu hóa đơn");
+        invoiceId = created.invoices?.[0]?.invoiceId;
+        if (!invoiceId) throw new Error("Không tìm thấy hóa đơn vừa tạo");
+      }
       const response = await fetch("/api/billing", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -165,14 +201,19 @@ export function BillingManager() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Không thể ghi nhận thanh toán");
-      setNotice("Đã ghi nhận thanh toán thành công");
-      window.setTimeout(() => setNotice(""), 3000);
+      setNotice(`Đã ghi nhận ${money(roomTotal(room))} cho phòng ${room.code}`);
+      window.setTimeout(() => setNotice(""), 3500);
       await load();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Không thể ghi nhận thanh toán");
     } finally {
       setSaving(false);
     }
+  };
+
+  const remindByEmail = (room: BillingRoom) => {
+    setNotice(`Nhắc nhở email cho phòng ${room.code} sẽ sẵn sàng sau khi cấu hình Google.`);
+    window.setTimeout(() => setNotice(""), 4000);
   };
 
   return (
@@ -214,7 +255,7 @@ export function BillingManager() {
         ) : (
           <div className="table-wrap">
             <table className="billing-table">
-              <thead><tr><th>PHÒNG / NGƯỜI THUÊ</th><th>TIỀN PHÒNG</th><th>CHỈ SỐ ĐIỆN</th><th>CHỈ SỐ NƯỚC</th><th>DỊCH VỤ</th><th>TỔNG CỘNG</th><th>TRẠNG THÁI</th><th /></tr></thead>
+              <thead><tr><th>PHÒNG / NGƯỜI THUÊ</th><th>TIỀN PHÒNG</th><th>CHỈ SỐ ĐIỆN</th><th>CHỈ SỐ NƯỚC</th><th>DỊCH VỤ</th><th>TỔNG CỘNG</th><th>TRẠNG THÁI</th><th>THAO TÁC</th></tr></thead>
               <tbody>{filtered.map((room) => {
                 const electricityUsage = Math.max(0, room.electricity_current - room.electricity_previous);
                 const waterUsage = Math.max(0, room.water_current - room.water_previous);
@@ -226,7 +267,16 @@ export function BillingManager() {
                   <td><strong>{money(room.internet_price + room.trash_price)}</strong><small>Internet + rác</small></td>
                   <td><strong className="billing-total">{money(roomTotal(room))}</strong><small>{room.invoice_id ? "Đã chốt hóa đơn" : "Tạm tính"}</small></td>
                   <td><span className={`invoice-status ${room.invoice_status || "draft"}`}>{room.invoice_status === "paid" ? "Đã thu" : room.invoice_id ? "Chưa thu" : "Chưa tạo"}</span></td>
-                  <td>{room.invoice_id && room.invoice_status !== "paid" ? <button className="collect-button" disabled={saving} onClick={() => markPaid(room.invoice_id!)}>Đã thu tiền</button> : room.invoice_status === "paid" ? <span className="paid-check">✓</span> : null}</td>
+                  <td><div className="invoice-actions">
+                    {room.invoice_status === "paid" ? <span className="paid-check" title="Đã thanh toán">✓</span> : <button className="invoice-icon-button paid" disabled={saving} onClick={() => markRoomPaid(room)} title="Đánh dấu đã thanh toán" aria-label="Đánh dấu đã thanh toán"><CheckIcon /></button>}
+                    <button className="invoice-icon-button reminder" onClick={() => remindByEmail(room)} title={`Nhắc email · đã gửi ${room.reminder_count} lần trong tháng`} aria-label={`Nhắc email, đã gửi ${room.reminder_count} lần trong tháng`}>
+                      <BellIcon />
+                      <span className="reminder-badge">{room.reminder_count}</span>
+                    </button>
+                    <button className="invoice-icon-button print" onClick={() => setPrintRoom(room)} title="In hóa đơn" aria-label="In hóa đơn">
+                      <PrintIcon />
+                    </button>
+                  </div></td>
                 </tr>;
               })}</tbody>
             </table>
@@ -234,7 +284,50 @@ export function BillingManager() {
           </div>
         )}
       </section>
+      {printRoom && <PrintableInvoice room={printRoom} period={period} dueDate={dueDate} />}
       {notice && <div className="toast"><span>✓</span>{notice}</div>}
     </div>
   );
+}
+
+function BellIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></svg>;
+}
+
+function PrintIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v7H6z" /><path d="M18 12h.01" /></svg>;
+}
+
+function CheckIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>;
+}
+
+function PrintableInvoice({ room, period, dueDate }: { room: BillingRoom; period: string; dueDate: string }) {
+  const electricityUsage = Math.max(0, room.electricity_current - room.electricity_previous);
+  const waterUsage = Math.max(0, room.water_current - room.water_previous);
+  const calculatedTotal = room.monthly_rent +
+    electricityUsage * room.electricity_price +
+    waterUsage * room.water_price +
+    room.internet_price +
+    room.trash_price;
+  const items = [
+    ["Tiền phòng", "1 tháng", room.monthly_rent],
+    ["Tiền điện", `${electricityUsage} kWh × ${money(room.electricity_price)}`, electricityUsage * room.electricity_price],
+    ["Tiền nước", `${waterUsage} m³ × ${money(room.water_price)}`, waterUsage * room.water_price],
+    ["Internet", "1 tháng", room.internet_price],
+    ["Phí dịch vụ, rác", "1 tháng", room.trash_price],
+  ] as const;
+  return <section className="print-invoice" aria-hidden="true">
+    <header><div><p>NHÀ TRỌ 365</p><h1>HÓA ĐƠN TIỀN PHÒNG</h1></div><strong>Tháng {period.slice(5)}/{period.slice(0, 4)}</strong></header>
+    <div className="print-invoice-meta">
+      <p><span>Nhà trọ</span><strong>{room.property_name}</strong></p>
+      <p><span>Phòng</span><strong>{room.code}</strong></p>
+      <p><span>Người thuê</span><strong>{room.tenant_name}</strong></p>
+      <p><span>Hạn thanh toán</span><strong>{new Date(`${dueDate}T00:00:00`).toLocaleDateString("vi-VN")}</strong></p>
+    </div>
+    <table><thead><tr><th>Khoản thu</th><th>Chi tiết</th><th>Thành tiền</th></tr></thead><tbody>
+      {items.map(([name, detail, amount]) => <tr key={name}><td>{name}</td><td>{detail}</td><td>{money(amount)}</td></tr>)}
+    </tbody><tfoot><tr><td colSpan={2}>TỔNG CỘNG</td><td>{money(room.total_amount === null ? calculatedTotal : Number(room.total_amount))}</td></tr></tfoot></table>
+    <footer><p>Trạng thái: <strong>{room.invoice_status === "paid" ? "Đã thanh toán" : room.invoice_id ? "Chưa thanh toán" : "Bản tạm tính"}</strong></p><p>Cảm ơn bạn đã thanh toán đúng hạn.</p></footer>
+  </section>;
 }

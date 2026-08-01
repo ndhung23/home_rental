@@ -27,7 +27,7 @@ export async function GET() {
         order by p.name, r.code
       `),
       db.query(`
-        select t.id, t.full_name, t.phone, t.email, t.identity_number, t.status,
+        select t.id, t.full_name, t.phone, t.email, t.identity_number, t.gender, t.date_of_birth, t.status,
           r.code as room_code, p.name as property_name
         from tenants t
         left join leases l on l.tenant_id = t.id and l.status = 'active'
@@ -69,9 +69,9 @@ export async function POST(request: Request) {
       );
     } else if (body.type === "tenant") {
       const tenant = await client.query(
-        `insert into tenants (organization_id, full_name, phone, email, identity_number)
-         values (${organizationSql}, $1, $2, $3, $4) returning id`,
-        [body.fullName, body.phone, body.email || null, body.identityNumber || null],
+        `insert into tenants (organization_id, full_name, phone, email, identity_number, gender, date_of_birth)
+         values (${organizationSql}, $1, $2, $3, $4, $5, $6) returning id`,
+        [body.fullName, body.phone, body.email || null, body.identityNumber || null, body.gender || null, body.dateOfBirth || null],
       );
       if (body.roomId) {
         await client.query(
@@ -119,8 +119,8 @@ export async function PUT(request: Request) {
       );
     } else if (body.type === "tenant") {
       await db.query(
-        `update tenants set full_name = $1, phone = $2, email = $3, identity_number = $4, status = $5 where id = $6`,
-        [body.fullName, body.phone, body.email || null, body.identityNumber || null, body.status || "active", body.id],
+        `update tenants set full_name = $1, phone = $2, email = $3, identity_number = $4, gender = $5, date_of_birth = $6, status = $7 where id = $8`,
+        [body.fullName, body.phone, body.email || null, body.identityNumber || null, body.gender || null, body.dateOfBirth || null, body.status || "active", body.id],
       );
     } else {
       throw new Error("Loại dữ liệu không hợp lệ");

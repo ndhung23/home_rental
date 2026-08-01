@@ -17,6 +17,7 @@ export async function GET(request: Request) {
         select r.id, r.code, r.monthly_rent, r.property_id, p.name property_name,
           coalesce(t.full_name, r.tenant_name, 'Chưa cập nhật') tenant_name,
           i.id invoice_id, i.total_amount, i.service_amount, i.status invoice_status,
+          coalesce(er.reminder_count, 0)::int reminder_count,
           coalesce(e.previous_value, pe.current_value, 0) electricity_previous,
           coalesce(e.current_value, pe.current_value, 0) electricity_current,
           coalesce(w.previous_value, pw.current_value, 0) water_previous,
@@ -32,6 +33,11 @@ export async function GET(request: Request) {
         left join leases l on l.room_id = r.id and l.status = 'active'
         left join tenants t on t.id = l.tenant_id
         left join invoices i on i.room_id = r.id and i.period = ($1 || '-01')::date
+        left join lateral (
+          select count(*)::int reminder_count
+          from invoice_email_reminders
+          where invoice_id = i.id and status = 'sent'
+        ) er on true
         left join services es on es.organization_id = r.organization_id and es.code = 'electricity'
         left join services ws on ws.organization_id = r.organization_id and ws.code = 'water'
         left join meter_readings e on e.room_id = r.id and e.service_id = es.id and e.period = ($1 || '-01')::date
@@ -65,6 +71,7 @@ export async function POST(request: Request) {
     await client.query("begin");
     const serviceResult = await client.query(`select id, code, name, unit_price, calculation_type from services where is_active`);
     const services = Object.fromEntries(serviceResult.rows.map((service) => [service.code, service]));
+    const createdInvoices: { roomId: string; invoiceId: string }[] = [];
 
     for (const room of rooms) {
       const electricityUsage = Number(room.electricityCurrent) - Number(room.electricityPrevious);
@@ -109,6 +116,7 @@ export async function POST(request: Request) {
           status = case when invoices.status = 'paid' then 'paid' else 'unpaid' end, updated_at = now()
         returning id
       `, [room.id, period, `${period}-${String(config.payment_due_day).padStart(2, "0")}`, rentAmount, serviceAmount]);
+      createdInvoices.push({ roomId: room.id, invoiceId: invoice.rows[0].id });
       await client.query(`delete from invoice_items where invoice_id = $1`, [invoice.rows[0].id]);
       await client.query(`insert into invoice_items (invoice_id, description, quantity, unit_price, amount) values ($1, 'Tiền phòng', 1, $2, $2)`, [invoice.rows[0].id, rentAmount]);
       for (const item of items) {
@@ -117,7 +125,7 @@ export async function POST(request: Request) {
       }
     }
     await client.query("commit");
-    return NextResponse.json({ ok: true, count: rooms.length });
+    return NextResponse.json({ ok: true, count: rooms.length, invoices: createdInvoices });
   } catch (error) {
     await client.query("rollback");
     return NextResponse.json({ error: error instanceof Error ? error.message : "Không thể tạo hóa đơn" }, { status: 400 });
@@ -132,8 +140,12 @@ export async function PATCH(request: Request) {
   try {
     const { invoiceId, method = "cash" } = await request.json();
     await client.query("begin");
-    const invoice = await client.query(`select organization_id, total_amount from invoices where id = $1 for update`, [invoiceId]);
+    const invoice = await client.query(`select organization_id, total_amount, status from invoices where id = $1 for update`, [invoiceId]);
     if (!invoice.rowCount) throw new Error("Không tìm thấy hóa đơn");
+    if (invoice.rows[0].status === "paid") {
+      await client.query("commit");
+      return NextResponse.json({ ok: true, alreadyPaid: true });
+    }
     await client.query(`insert into payments (organization_id, invoice_id, amount, payment_method) values ($1,$2,$3,$4)`,
       [invoice.rows[0].organization_id, invoiceId, invoice.rows[0].total_amount, method]);
     await client.query(`update invoices set status = 'paid', paid_at = now(), updated_at = now() where id = $1`, [invoiceId]);

@@ -4,6 +4,8 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { MasterData } from "./MasterData";
 import { BillingManager } from "./BillingManager";
 import { SettingsManager } from "./SettingsManager";
+import { OperationsManager, type OperationMode } from "./OperationsManager";
+import { PropertyLayout } from "./PropertyLayout";
 import { useRouter } from "next/navigation";
 
 type RoomStatus = "Đang thuê" | "Còn trống" | "Sắp hết hạn" | "Chưa thanh toán";
@@ -17,6 +19,11 @@ type Room = {
   due: string;
 };
 
+type DashboardFinance = {
+  summary: { billed: number; paid: number; debt: number };
+  revenue: { period: string; billed: number; paid: number }[];
+};
+
 const initialRooms: Room[] = [
   { id: "P.101", tenant: "Nguyễn Minh Anh", phone: "090 312 4578", price: 3200000, status: "Đang thuê", due: "Đã thanh toán" },
   { id: "P.102", tenant: "Trần Quốc Bảo", phone: "098 672 0193", price: 3000000, status: "Chưa thanh toán", due: "Quá hạn 3 ngày" },
@@ -26,16 +33,26 @@ const initialRooms: Room[] = [
   { id: "P.203", tenant: "Võ Thanh Tú", phone: "097 447 9261", price: 3000000, status: "Chưa thanh toán", due: "Hạn hôm nay" },
 ];
 
-const navItems = [
-  ["Tổng quan", "⌂"],
-  ["Dữ liệu nền", "▦"],
-  ["Thu tiền", "₫"],
-  ["Điện nước", "ϟ"],
-  ["Hóa đơn", "▤"],
-  ["Bảo trì", "⌕"],
-  ["Báo cáo", "↗"],
-  ["Cài đặt", "⚙"],
+const navGroups = [
+  { title: "QUẢN LÝ", items: [["Tổng quan", "dashboard"], ["Sơ đồ phòng", "dashboard"], ["Dữ liệu nền", "database"], ["Thu tiền", "wallet"]] },
+  { title: "VẬN HÀNH", items: [["Điện nước", "meter"], ["Hóa đơn", "invoice"], ["Thu chi", "wallet"], ["Phương tiện", "meter"], ["Tài sản", "database"], ["Dịch vụ", "invoice"], ["Bảo trì", "tools"], ["Công việc", "tools"], ["Thông báo", "invoice"]] },
+  { title: "BÁO CÁO", items: [["Báo cáo", "report"]] },
+  { title: "CÀI ĐẶT", items: [["Cài đặt", "settings"]] },
 ] as const;
+
+function SidebarIcon({ name }: { name: string }) {
+  const paths: Record<string, React.ReactNode> = {
+    dashboard: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
+    database: <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5" /><path d="M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7" /></>,
+    wallet: <><path d="M4 7a3 3 0 0 1 3-3h12a1 1 0 0 1 1 1v15H7a3 3 0 0 1-3-3z" /><path d="M4 8h14" /><path d="M15 12h6v5h-6a2.5 2.5 0 0 1 0-5z" /></>,
+    meter: <><path d="M5 20a8 8 0 1 1 14 0" /><path d="m12 12 4-3" /><path d="M7 20h10" /></>,
+    invoice: <><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z" /><path d="M9 8h6M9 12h6M9 16h3" /></>,
+    tools: <><path d="M14.5 6.5a4 4 0 0 0-5-5l2.2 2.2-2 2-2.2-2.2a4 4 0 0 0 5 5l7.1 7.1a2.8 2.8 0 0 1-4 4l-7.1-7.1a4 4 0 0 0-5-5" /></>,
+    report: <><path d="M4 20V10M10 20V4M16 20v-7M22 20V7" /><path d="M2 20h22" /></>,
+    settings: <><circle cx="12" cy="12" r="3" /><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.5 1A7 7 0 0 0 14 5.7L13.6 3h-4L9 5.7a7 7 0 0 0-2.3 1.4l-2.5-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.5-1A7 7 0 0 0 9 18.3l.5 2.7h4l.5-2.7a7 7 0 0 0 2.3-1.4l2.5 1 2-3.4-2-1.5a7 7 0 0 0 .2-1z" /></>,
+  };
+  return <svg viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
+}
 
 const currency = (value: number) =>
   new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND", maximumFractionDigits: 0 }).format(value);
@@ -56,6 +73,10 @@ export default function Dashboard({
   const [notice, setNotice] = useState("");
   const [databaseOnline, setDatabaseOnline] = useState(false);
   const [masterSection, setMasterSection] = useState<"Nhà trọ" | "Phòng trọ" | "Khách thuê">(initialMasterSection);
+  const [finance, setFinance] = useState<DashboardFinance>({
+    summary: { billed: 0, paid: 0, debt: 0 },
+    revenue: [],
+  });
 
   useEffect(() => {
     const loadRooms = async () => {
@@ -81,6 +102,28 @@ export default function Dashboard({
     };
     void loadRooms();
   }, []);
+
+  useEffect(() => {
+    if (activeNav !== "Tổng quan") return;
+    fetch("/api/dashboard", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Không thể tải doanh thu");
+        return response.json();
+      })
+      .then((data) => setFinance({
+        summary: {
+          billed: Number(data.summary.billed),
+          paid: Number(data.summary.paid),
+          debt: Number(data.summary.debt),
+        },
+        revenue: data.revenue.map((item: { period: string; billed: string | number; paid: string | number }) => ({
+          period: item.period,
+          billed: Number(item.billed),
+          paid: Number(item.paid),
+        })),
+      }))
+      .catch(() => undefined);
+  }, [activeNav]);
 
   const filteredRooms = useMemo(
     () =>
@@ -133,25 +176,29 @@ export default function Dashboard({
         </div>
 
         <nav aria-label="Điều hướng chính">
-          <p className="nav-label">QUẢN LÝ</p>
-          {navItems.map(([label, icon]) => (
-            <button
-              className={activeNav === label ? "nav-item active" : "nav-item"}
-              key={label}
-              onClick={() => {
-                setActiveNav(label);
-                if (label === "Tổng quan") router.push("/");
-                else if (label === "Dữ liệu nền") router.push("/du-lieu-nen/nha-tro");
-                else if (label === "Thu tiền") router.push("/thu-tien");
-                else if (label === "Cài đặt") router.push("/cai-dat");
-                else toast(`${label} đang được hoàn thiện trong bản tiếp theo`);
-              }}
-            >
-              <span className="nav-icon">{icon}</span>
-              {label}
-              {label === "Bảo trì" && <em>3</em>}
-            </button>
-          ))}
+          {navGroups.map((group) => <div className="nav-group" key={group.title}>
+            <p className="nav-label">{group.title}</p>
+            {group.items.map(([label, icon]) => (
+              <button
+                className={activeNav === label ? "nav-item active" : "nav-item"}
+                key={label}
+                title={label}
+                aria-label={label}
+                onClick={() => {
+                  setActiveNav(label);
+                  if (label === "Tổng quan") router.push("/");
+                  else if (label === "Dữ liệu nền") router.push("/du-lieu-nen/nha-tro");
+                  else if (label === "Thu tiền") router.push("/thu-tien");
+                  else if (label === "Cài đặt") router.push("/cai-dat");
+                  else if (!["Sơ đồ phòng", "Điện nước", "Hóa đơn", "Thu chi", "Phương tiện", "Tài sản", "Dịch vụ", "Bảo trì", "Công việc", "Thông báo", "Báo cáo"].includes(label)) toast(`${label} đang được hoàn thiện trong bản tiếp theo`);
+                }}
+              >
+                <span className="nav-icon"><SidebarIcon name={icon} /></span>
+                {label}
+                {label === "Bảo trì" && <em>3</em>}
+              </button>
+            ))}
+          </div>)}
         </nav>
 
         <div className="sidebar-bottom">
@@ -202,11 +249,11 @@ export default function Dashboard({
           </article>
           <article className="stat-card">
             <div className="stat-top"><span className="stat-icon coral">₫</span><b className="trend up">↗ 12.5%</b></div>
-            <p>Doanh thu tháng 7</p><h2>68,4 tr</h2><small>Đã thu 62,1 triệu</small>
+            <p>Doanh thu tháng {new Date().getMonth() + 1}</p><h2>{currency(finance.summary.billed)}</h2><small>Đã thu {currency(finance.summary.paid)}</small>
           </article>
           <article className="stat-card">
             <div className="stat-top"><span className="stat-icon amber">!</span><b className="trend down">2 hóa đơn</b></div>
-            <p>Công nợ cần thu</p><h2>6,3 tr</h2><small>Giảm 1,2 triệu so tháng trước</small>
+            <p>Công nợ cần thu</p><h2>{currency(finance.summary.debt)}</h2><small>Số tiền chưa thanh toán trong tháng</small>
           </article>
         </section>
 
@@ -217,17 +264,19 @@ export default function Dashboard({
               <button className="select-button">6 tháng gần nhất⌄</button>
             </div>
             <div className="revenue-summary">
-              <div><small>TỔNG DOANH THU</small><strong>372,8 triệu</strong></div>
+              <div><small>TỔNG DOANH THU ĐÃ THU</small><strong>{currency(finance.revenue.reduce((sum, item) => sum + item.paid, 0))}</strong></div>
               <span><i className="dot green-dot" /> Đã thu</span>
               <span><i className="dot beige-dot" /> Dự kiến</span>
             </div>
             <div className="chart" aria-label="Biểu đồ doanh thu từ tháng 2 đến tháng 7">
-              {[49, 58, 55, 71, 64, 82].map((height, index) => (
-                <div className="bar-group" key={height + index}>
+              {finance.revenue.map((item) => {
+                const maxRevenue = Math.max(1, ...finance.revenue.map((month) => month.billed));
+                const height = Math.max(item.paid > 0 ? 6 : 0, Math.round(item.paid / maxRevenue * 100));
+                return <div className="bar-group" key={item.period}>
                   <div className="bar-track"><span style={{ height: `${height}%` }} /></div>
-                  <small>Th.{index + 2}</small>
+                  <small>Th.{Number(item.period.slice(5))}</small>
                 </div>
-              ))}
+              })}
               <div className="chart-grid"><i /><i /><i /><i /></div>
             </div>
           </article>
@@ -299,6 +348,10 @@ export default function Dashboard({
           <BillingManager />
         </> : activeNav === "Cài đặt" ? <>
           <SettingsManager />
+        </> : activeNav === "Sơ đồ phòng" ? <>
+          <PropertyLayout />
+        </> : ["Điện nước", "Hóa đơn", "Thu chi", "Phương tiện", "Tài sản", "Dịch vụ", "Bảo trì", "Công việc", "Thông báo", "Báo cáo"].includes(activeNav) ? <>
+          <OperationsManager mode={activeNav as OperationMode} />
         </> : null}
       </section>
 
